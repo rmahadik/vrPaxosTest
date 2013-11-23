@@ -1,0 +1,613 @@
+"""
+Module: TestvrPaxos
+Project: Multi-Paxos
+Author: Rucha Mahadik (SB ID# 108672217)
+Description: This is a test suite implemented for testing the correction of Multi-Paxos. 
+In this implementation I am trying to mimick a model checking tool for a Multi-Paxos implementation. The module assumes that 
+the Multi-Paxos implementations follow the interface of [1]. The module works by extending the classes of the Multi-Paxos implementation
+to provide ability to trace the behaviour and maintain a global state of the system. The idea is to have 
+a driver that runs this extended program using varied inputs and which can test the program against the implemented invariants. 
+To represent each invariant a function is used. This function returns a boolean value depending on whether the invariant 
+holds or not. The module maintains the global state of the system based on the messages passed between the process. 
+
+
+Further work:
+- Implementing the "How" part of the invariants described in [1] using the global state and the local state of processes.
+- Providing input parameters to be able to observe the algorithm under varied environments
+- Implement the functions to be able to kill/recover processes 
+- Use of semaphores for the globally shared queue
+- To come up with a better data structure to hold the messages globally (if required) 
+
+Issues:
+- I need to figure out how to catch events of messages sent by Scout and Commander classes as these processes are spawned 
+in side Leader class functions by using Class names. 
+
+Maintaing the global state:
+I initially tried overriding the OnRequest, OnDecision, etc functions, but realized that as in distalgo these are actaully 
+event handlers so the approach wont work.
+I now I have overridden the 'send' function of DistProcess in my classes (which inherit from DistProcess). By doing so, everytime
+a message is sent by a process, I can get some information about the state of the system. I have maintained a queue in which 
+I add each new message that is sent (ignoring duplicates). 
+These messages contain information about message-type, sender, receiver and the message-detail. Using this information invariants 
+that depend on the global state of the system can be checked.  
+
+Using Test Frameworks:
+I have come across two Frameworks in Python that I found interesting keeping in mind the multithreading approach of the program
+(1) Nose (2) py.Test
+I will be deciding on which on to use by the time my basic framework is completed
+
+Reference:
+[1] Van Renesse, Robbert. "Paxos made moderately complex." Cited on (2011).
+
+Invariants done so far:
+-----------------------
+A1: an acceptor can only adopt strictly increasing ballot numbers;
+A2: an acceptor 'a' can only add (b,s,p) to a.accepted(i.e., accept (b,s,p)) if b = ballot_num;
+A3: not required
+A4: Informally, given a particular ballot number and slot number, there can be at most one proposal under consideration by the set of
+acceptors.
+A5: Suppose that for each a among a majority of acceptors, (b,s,c) in a.accepted. If b' > b and (b',s,c') in a'.accepted, then c = c'
+L1: For any b and s, at most one commander is spawned;
+L2: Same as A5
+R1: Two different commands are never decided for the same slot
+R2: All commands up to slot num are in the set of decisions
+
+R3: For all replicas r, r:state is the result of applying the operations in (s,c) of   r:decisions for all s
+such that 1 < s < slot num to initial state, in order of slot number;
+
+R4: For each r, the variable r.slot num cannot decrease over time.
+"""
+
+
+from random import randint
+import random 
+import unittest
+import time
+from multiprocessing import Process, Manager
+import ctypes
+from ctypes import c_int, c_char_p
+import sys
+import atexit
+from os import kill
+from signal import alarm, signal, SIGALRM, SIGKILL
+
+
+class Alarm(Exception):
+    pass
+def alarm_handler(signum, frame):
+    print("Tryinggggg to kill process************************3*****")
+    raise Alarm
+
+test = dist_source('.', './DistPy/vrPaxos.da')[1]
+NOPS = 10                       # Number of operations of the state machine
+operations = {i: (lambda state: (state+i,state+i)) for i in range(NOPS)}
+myqueue = ['global']
+
+
+class TestReplica(test.Replica):
+    '''
+    This class extends the original implementation of the Replica. The main aim of this class is to provide trace messages 
+    to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
+    interface as that of the Base class methods.
+    '''
+    def setup(leaders, initial_state, l, invariantFailed, gdecision, killReplica):
+        '''
+        Initialization 
+        param leaders: set of leaders
+        param initial_state: initial state of the Replica. The state of the Replica is modified as operations are performed   
+        '''
+        timeout = killReplica[self]
+        output('Trace - Setup Replica'+str(timeout))
+        super(TestReplica,self).setup(leaders, initial_state)
+
+
+
+    def main():
+        '''
+        Run the process
+        '''
+        #if timeout != -1:
+
+        signal(SIGALRM, alarm_handler)
+
+       
+        try:
+            alarm(timeout)
+            super(TestReplica,self).main()
+            alarm(0)
+
+        except Alarm as s:
+            print("**********SIGKILL******************"+str(self._id))
+            kill(self, SIGKILL)
+
+
+
+    def propose(p):
+        '''
+        Extend the propose function for tracing system behaviour
+        param p: tuple of the form (k, cid, operation) where k is the identifier of the client that issued the command 
+        and cid a client local unique command identifier
+        '''
+        output('Trace - propose')
+        super(TestReplica,self).propose(p)
+
+    def perform(p):
+        '''
+        Extend the perform function for tracing system behaviour
+        param p: tuple of the form (k, cid, operation) where k is the identifier of the client that issued the command 
+        and cid a client local unique command identifier
+        '''
+        output('Trace - perform')
+        # Updating global decision list for replica's invariants
+        for d in self.decisions:
+            if d not in gdecision:
+                gdecision.append(d)
+
+        print("***************************** R2 starts**********************************")
+        R2 = True
+        print("Current slot number: "+str(self.slot_num))
+        for s in range(1, self.slot_num):
+            if not {(s0,p) for (s0,p) in self.decisions if s0==s}:
+                output("R2 Failed: No command for s="+str(s)+" in decision list")
+                R2 = False
+        if not R2:
+            if 'R2' not in invariantFailed:
+                invariantFailed.append('R2')
+        print("***************************** R2 ends**********************************")
+        print("***************************** R4 starts**********************************")
+        # R4: For each r, the variable r.slot num cannot decrease over time.
+        R4 = True
+        prev_slot_num = self.slot_num
+        print("old slot num: "+str(prev_slot_num))
+        super(TestReplica,self).perform(p)
+        print("new slot num: "+str(self.slot_num))
+        if self.slot_num < prev_slot_num :
+            R4 = False
+        if not R4:
+            if 'R4' not in invariantFailed:
+                invariantFailed.append('R4')
+        print("***************************** R4 ends**********************************")
+
+   
+    def send(*args):
+        '''
+        Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
+        param args: tuple containing the message and set of receivers
+        '''
+        #l.append('replica')
+
+        updateGlobalState(self,l,invariantFailed,args);
+        super(TestReplica,self).send(*args)  
+
+class TestAcceptor(test.Acceptor):
+    '''
+    This class extends the original implementation of the Acceptor. The main aim of this class is to provide trace messages 
+    to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
+    interface as that of the Base class methods.
+    '''
+    def setup(l, invariantFailed, gaccepted):
+        '''
+        Initialization
+        '''
+        output('Trace - Setup Acceptor')
+        prev_accepted = set()
+        super(TestAcceptor,self).setup()
+
+    def main():
+        '''
+        Run the process
+        '''
+        output('Trace - start Acceptor')
+        super(TestAcceptor,self).main()
+
+    def send(*args):
+        '''
+        Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
+        param args: tuple containing the message and set of receivers
+        '''
+        
+
+        #an acceptor 'a' can only add (b,s,p) to a.accepted(i.e., accept (b,s,p)) if b = ballot_num;
+
+        if args[0][0]=='P2b':
+            A2 = True;
+            #print(args)
+            new_accepted = {p for p in self.accepted if p not in prev_accepted}
+            if self in gaccepted:
+                acc_list = gaccepted[self];
+            else:
+                acc_list = set()
+            acc_list = acc_list | self.accepted
+            gaccepted[self] = acc_list;
+            #print("*****************************gaccepted[self]: "+str(self.accepted))
+            #print("*****************************gaccepted[self]: "+str(gaccepted[self]))
+            if new_accepted:
+                print("************************* A2 starts ******************************8")
+                print("prev_accepted: "+str(prev_accepted))
+                print("new_accepted: "+str(new_accepted))
+                print("self.accepted: "+str(self.accepted))
+                for (b,s,p) in new_accepted:
+                    #print(str(b)+" : "+str(self.ballot_num));
+                    if b!=self.ballot_num:
+                        A2 = False;
+                if not A2:
+                    invariantFailed.append('A2')
+                prev_accepted = self.accepted
+                print("************************* A2 ends ******************************8")
+        
+
+        updateGlobalState(self,l,invariantFailed,args);
+        super(TestAcceptor,self).send(*args)  
+
+class TestLeader(test.Leader):
+    '''
+    This class extends the original implementation of the Leader. The main aim of this class is to provide trace messages 
+    to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
+    interface as that of the Base class methods.
+    '''
+    def setup(acceptors, replicas,l, invariantFailed):
+        '''
+        Initialization
+        param acceptors: set of acceptors
+        param replicas: set of replicase
+        '''
+        output('Trace - Setup Leader')
+        spawned_commanders = set()
+        super(TestLeader,self).setup(acceptors, replicas)
+
+    def main():
+        '''
+        Run the process
+        '''
+        output('Trace - start Leader')
+        super(TestLeader,self).main()
+
+    def send(*args):
+        '''
+        Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
+        param args: tuple containing the message and set of receivers
+        '''
+        #l.append('leader')
+        updateGlobalState(self,l,invariantFailed,args);
+        super(TestLeader,self).send(*args)  
+    def spawn(pcls, args):
+        args.append(l)
+        args.append(invariantFailed)
+        if 'Scout' in str(pcls):
+            super(TestLeader,self).spawn(TestScout, args)
+        
+        if 'Commander' in str(pcls):
+            L1=True
+            print("******************************L1 starts*********************************")
+            output(str(args[3]));
+            print("Spawning Commander for :"+str(args[3]))
+            b,s,p=args[3]
+            if (b,s) in spawned_commanders:
+                L1 = False
+            else:
+                spawned_commanders.add((b,s))
+            if not L1:
+                invariantFailed.append('L1')
+            print("******************************L1 ends*********************************")
+            super(TestLeader,self).spawn(TestCommander, args)
+
+class TestCommander(test.Commander):
+    '''
+    This class extends the original implementation of the Commander. The main aim of this class is to provide trace messages 
+    to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
+    interface as that of the Base class methods.
+    '''
+    def setup(lam, acceptors, replicas, load,l, invariantFailed):
+        '''
+        Initialization
+        param lam : identifier of its leader
+        param acceptors: set of identifers of the acceptors
+        param replicas: set of identifiers of the replicas
+        param load: the pvalue i.e the (b, s, p) tuple with ballot number b, a slot number s, and a command c.
+        '''
+        output('Trace - Setup Commander')
+        super(TestCommander,self).setup(lam, acceptors, replicas, load)
+
+    def main():
+        '''
+        Run the process
+        '''
+        output('Trace - Start Commander')
+        super(TestCommander,self).main()
+
+    def send(*args):
+        '''
+        Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
+        param args: tuple containing the message and set of receivers
+        '''
+        output('Trace - Send Commander')
+        #l.append('Commander')
+        updateGlobalState(self,l,invariantFailed,args);
+        super(TestCommander,self).send(*args)  
+
+class TestScout(test.Scout):
+    '''
+    This class extends the original implementation of the Scout. The main aim of this class is to provide trace messages 
+    to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
+    interface as that of the Base class methods.
+    '''
+    def setup(lam, acceptors, b,l, invariantFailed):
+        '''
+        Initialization
+        param lam:identifier of its leader
+        param acceptors: set of identifers of the acceptors
+        param b: ballot_num
+        '''
+        output('Trace - Setup Scout')
+        super(TestScout,self).setup(lam, acceptors, b)
+
+    def main():
+        '''
+        Run the process
+        '''
+        output('Trace - Start Scout')
+        super(TestScout,self).main()
+    
+    def send(*args):
+        '''
+        Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
+        param args: tuple containing the message and set of receivers
+        '''
+        #l.append('Scout')
+        updateGlobalState(self,l,invariantFailed,args);
+        super(TestScout,self).send(*args)    
+
+class TestClient(test.Client):
+    '''
+    This class extends the original implementation of the Client. The main aim of this class is to provide trace messages 
+    to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
+    interface as that of the Base class methods.
+    '''
+    def setup(replicas,l ,invariantFailed):
+        '''
+        Initialization
+        param replicas: set of identifiers of the replicas
+        '''
+        output('Trace - Setup Client')
+        responseTime=7
+        prev_result = 0
+        super(TestClient,self).setup(replicas)
+
+    def main():
+        '''
+        Run the process
+        '''
+        output('Trace - Start Client')
+        
+        signal(SIGALRM, alarm_handler_client)
+
+       
+        try:
+            alarm(responseTime)
+            super(TestClient,self).main()
+            alarm(0)
+
+        except Alarm as s:
+            print("***************************8invariantFailed***********************8")
+
+    def alarm_handler_client(signum, frame):
+        print("Client signal handler************************3*****")
+        if not len(self.results) > prev_result:
+
+            output("******************************no new result received"+str(self.results))
+            invariantFailed.append("Liveness")
+                #kill(self, SIGKILL)
+        else:
+            prev_result=len(self.results)
+            responseTime=responseTime*2
+            alarm(responseTime)
+        #raise Alarm
+
+
+
+
+
+    def send(*args):
+        '''
+        Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
+        param args: tuple containing the message and set of receivers
+        '''
+        #l.append('client')
+        updateGlobalState(self,l,invariantFailed,args);
+        super(TestClient,self).send(*args)
+
+class Monitor(DistProcess):
+    def setup(l,invariantFailed, gdecision,gaccepted ,acceptors):
+        output("Setting up Monitor");
+        #acceptor_ballot_num = dict((acceptors, 0) for a in acceptors) # maintains the last accepted ballot_number of the acceptor
+        tested = set()
+    def main():
+        '''
+        Check if invariants hold.
+        invariantFailed() is an example of a function that would test if the invariant holds
+        '''
+        global myqueue
+        done =  False
+        while not done:           
+            time.sleep(1)
+
+            print("**************************************A4 invariants starts******************************")
+
+            all_accepted = set()
+            A4=True
+            for sender1, msg1 in l:
+                if msg1[0]=='P1b' and msg1[3]:
+                    #print(msg1[3]); # msg[3]  has the accepted list (b,s,p)
+                    for (b1,s1,p1) in msg1[3]:
+                        all_accepted.add((b1,s1,p1))
+            for (b1,s1,p1) in all_accepted:
+                for (b2,s2,p2) in all_accepted:
+                    if (b1,s1)==(b2,s2) and p1!=p2:
+                        A4=False
+            if not A4:
+                invariantFailed.append('A4')
+            print("**************************************A4 invariants ends******************************")
+            print("**************************************R1 invariants starts******************************")
+            #R1: Two different commands are never decided for the same slot
+            R1 = True
+            print('gdecision: '+str(gdecision))
+            for (s1, p1) in gdecision:
+                for (s2, p2) in gdecision:
+                    if s1==s2 and not p1==p2:
+                        R1=False
+            if not R1:
+                invariantFailed.append('R1')
+            print("**************************************R1 invariants ends******************************")
+            print("**************************************L2, A5 invariants starts******************************")
+            
+            allAccepted = set()
+            #print("gaccepted: "+str(gaccepted))
+
+            for a in iter(gaccepted.keys()):
+                allAccepted.update(gaccepted[a])
+            A5 = True    
+            #print(str(allAccepted))
+            for acc in allAccepted:
+                acc_count=0
+                for a in iter(gaccepted.keys()):
+                    acc_list = gaccepted[a]
+                    if acc in acc_list:
+                        print(str(acc)+' found in acceptor - '+str(a))
+                        acc_count+=1;
+                    if acc_count > len(acceptors)/2:
+                        break;
+                if(acc_count > len(acceptors)/2):
+                    print(str(acc)+"is in majority")
+                    b,s,p =  acc
+                    for a2 in iter(gaccepted.keys()):
+                        acc_list2 = gaccepted[a2]
+                        for (b2,s2,p2) in acc_list2:
+                            if b2 > b and s2==s and not p==p2:
+                                A5 = False
+                                print("L2, A5 failed for : "+str(acc)); 
+                                break;
+                print('While checking for '+str(acc)+', other c not found in accepted list for the same slot')
+            if not A5:
+                invariantFailed.append('L2, A5')
+
+            print("**************************************A5 invariants ends******************************")
+
+            if invariantFailed:
+                print("************************************** Failed ******************************")
+                print("Failed invariants: "+str(invariantFailed))
+                done = True;
+            else:
+                print("**************************************All invariants hold******************************")
+                #invariantFailed.append("All invariants hold")
+                #done = True;
+    
+
+
+
+def main():
+    '''
+    Begin the tests. This function is to be modified to enable passing input parameters for acceptors,nreplicas,nleaders,nclients,nops
+    Also, other configuration options to support destruction/recovery of processes will be added.
+    '''
+
+    nacceptors = 5
+    nreplicas = 5
+    nleaders = 5
+    nclients = 1
+    nops = 1
+
+
+
+    use_channel("tcp")
+    manager = Manager()
+
+
+    l = manager.list()
+    invariantFailed = manager.list()
+    gdecision = manager.list()
+    gaccepted = manager.dict()
+    '''
+    Create processes for Acceptor,Replica,Leader,Client
+    '''
+    acceptors = createprocs(TestAcceptor, nacceptors, [l, invariantFailed, gaccepted])
+    replicas = createprocs(TestReplica, nreplicas)
+    leaders = createprocs(TestLeader, nleaders, (acceptors, replicas,l,invariantFailed))
+    clients = createprocs(TestClient, nclients, (replicas,l,invariantFailed))
+
+    # no. of processes to kill
+    nkillReplica = 4
+    killInterval = 1
+    starttime = 2
+    killReplica = killTimes(replicas,nkillReplica,starttime,killInterval)
+    print("kill times : "+str(killReplica))
+
+    setupprocs(replicas, (leaders, 0, l, invariantFailed, gdecision, killReplica))
+    '''
+    Run processes for Acceptor,Replica,Leader,Client
+    '''
+    startprocs(acceptors)
+    startprocs(replicas | leaders)
+    startprocs(clients)
+    
+    monitor = createprocs(Monitor,1,[l, invariantFailed,gdecision, gaccepted,  acceptors])
+    startprocs(monitor)
+
+    
+
+    while not (len(invariantFailed)>0): pass
+    print("******************************invariantFailed time: "+str(time.time()))
+    start = time.time()
+    print("invariantFailed: "+str(invariantFailed))
+    duration = time.time()-start
+    print("******************************invariantFailed time: "+str(duration))
+    for p in acceptors | replicas | leaders | clients | monitor:
+        print("****************************** Terminating all processes ***************************************")
+        p.terminate()
+    #for p in acceptors | replicas | leaders | clients | monitor: 
+    #   p.terminate()
+    #    p.join(); 
+        
+
+
+def updateGlobalState(self, l,invariantFailed,args):
+    '''
+    This function is called every time a message is sent by a process. 
+    It is used to:
+    (1) trace the system behaviour 
+    (2) update global queue with new messages
+    '''
+    global myqueue
+    #print("************************************"+str(l))
+    #print("*******************updateGlobalState***************************** A1  starts******************************")
+    # A1: an acceptor can only adopt strictly increasing ballot numbers;
+    A1 = True;
+    if args[0][0]=='P2b':
+        print(str(self)+" Sending: ballot_num: "+str(args[0][2][0])+" to "+str(args[1]))
+        new_ballot_num =  args[0][2][0]
+        #test invariant A1 before adding to list
+        for (sender,msg) in l:
+            if self==sender and str(msg[0])=='P2b' and new_ballot_num < msg[2][0]:
+                A1 = False;
+                #print(str(sender)+"::::::::::::::::::::::::::::::::::::::::::::::::::::::::" + str(msg)+"Ballot num: "+str(msg[2][0]))
+            
+    if not A1 : invariantFailed.append("A1")
+    #print("*******************updateGlobalState***************************** A1  starts******************************")
+    if (self, args[0]) not in l : l.append((self, args[0])) 
+    #('global queue length: '+str(myqueue))
+    #A1()
+
+def getGlobal():
+    global myqueue
+    print('global queue '+str(myqueue))
+    return myqueue
+
+def killTimes(replicas,nkillReplica,replicaTimeout,killInterval):
+    killReplicaList = random.sample(replicas, nkillReplica)
+    killReplica = dict({r : 0 for r in replicas})
+    for r in killReplica:
+        if r in killReplicaList:
+            killReplica[r]=replicaTimeout;
+            replicaTimeout=replicaTimeout+killInterval
+    
+    return killReplica
+#runTests();
