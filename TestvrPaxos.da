@@ -52,16 +52,15 @@ L2: Same as A5
 R1: Two different commands are never decided for the same slot
 R2: All commands up to slot num are in the set of decisions
 
-R3: For all replicas r, r:state is the result of applying the operations in (s,c) of   r:decisions for all s
+R3: For all replicas r, r:state is the result of applying the operations in (s,c) of r:decisions for all s
 such that 1 < s < slot num to initial state, in order of slot number;
 
 R4: For each r, the variable r.slot num cannot decrease over time.
 """
 
-
-from random import randint
+import getopt
 import random 
-import unittest
+import subprocess
 import time
 from multiprocessing import Process, Manager
 import ctypes
@@ -81,8 +80,9 @@ def alarm_handler(signum, frame):
 test = dist_source('.', './DistPy/vrPaxos.da')[1]
 NOPS = 10                       # Number of operations of the state machine
 operations = {i: (lambda state: (state+i,state+i)) for i in range(NOPS)}
-myqueue = ['global']
-
+packetDrop = 0.0
+messageDelay = 0
+max_request_batch = 1
 
 class TestReplica(test.Replica):
     '''
@@ -143,9 +143,9 @@ class TestReplica(test.Replica):
             if d not in gdecision:
                 gdecision.append(d)
 
-        print("***************************** R2 starts**********************************")
+        print("***************************** Testing R2 **********************************")
         R2 = True
-        print("Current slot number: "+str(self.slot_num))
+        #print("Current slot number: "+str(self.slot_num))
         for s in range(1, self.slot_num):
             if not {(s0,p) for (s0,p) in self.decisions if s0==s}:
                 output("R2 Failed: No command for s="+str(s)+" in decision list")
@@ -153,20 +153,20 @@ class TestReplica(test.Replica):
         if not R2:
             if 'R2' not in invariantFailed:
                 invariantFailed.append('R2')
-        print("***************************** R2 ends**********************************")
-        print("***************************** R4 starts**********************************")
+
+        print("***************************** Testing R4 **********************************")
         # R4: For each r, the variable r.slot num cannot decrease over time.
         R4 = True
         prev_slot_num = self.slot_num
-        print("old slot num: "+str(prev_slot_num))
+        #print("old slot num: "+str(prev_slot_num))
         super(TestReplica,self).perform(p)
-        print("new slot num: "+str(self.slot_num))
+        #print("new slot num: "+str(self.slot_num))
         if self.slot_num < prev_slot_num :
             R4 = False
         if not R4:
             if 'R4' not in invariantFailed:
                 invariantFailed.append('R4')
-        print("***************************** R4 ends**********************************")
+
 
    
     def send(*args):
@@ -174,10 +174,14 @@ class TestReplica(test.Replica):
         Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
         param args: tuple containing the message and set of receivers
         '''
-        #l.append('replica')
 
-        updateGlobalState(self,l,invariantFailed,args);
-        super(TestReplica,self).send(*args)  
+        currentprob = random.random()
+        if(currentprob>packetDrop):
+            updateGlobalState(self,l,invariantFailed,args);
+            time.sleep(random.randint(0,messageDelay))
+            super(TestReplica,self).send(*args)  
+        else:
+            print(str(self)+ " dropped Packet "+str(args[0][0])+" to "+str(args[1]));
 
 class TestAcceptor(test.Acceptor):
     '''
@@ -185,12 +189,13 @@ class TestAcceptor(test.Acceptor):
     to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
     interface as that of the Base class methods.
     '''
-    def setup(l, invariantFailed, gaccepted):
+    def setup(l, invariantFailed, gaccepted, killAcceptor):
         '''
         Initialization
         '''
         output('Trace - Setup Acceptor')
         prev_accepted = set()
+        timeout = killAcceptor[self]
         super(TestAcceptor,self).setup()
 
     def main():
@@ -198,7 +203,20 @@ class TestAcceptor(test.Acceptor):
         Run the process
         '''
         output('Trace - start Acceptor')
-        super(TestAcceptor,self).main()
+       
+        signal(SIGALRM, alarm_handler)
+
+       
+        try:
+            alarm(timeout)
+            super(TestAcceptor,self).main()
+            alarm(0)
+
+        except Alarm as s:
+            print("Acceptor "+str(self._id)+" failed")
+            kill(self, SIGKILL)
+
+
 
     def send(*args):
         '''
@@ -209,6 +227,7 @@ class TestAcceptor(test.Acceptor):
 
         #an acceptor 'a' can only add (b,s,p) to a.accepted(i.e., accept (b,s,p)) if b = ballot_num;
 
+        
         if args[0][0]=='P2b':
             A2 = True;
             #print(args)
@@ -222,10 +241,10 @@ class TestAcceptor(test.Acceptor):
             #print("*****************************gaccepted[self]: "+str(self.accepted))
             #print("*****************************gaccepted[self]: "+str(gaccepted[self]))
             if new_accepted:
-                print("************************* A2 starts ******************************8")
-                print("prev_accepted: "+str(prev_accepted))
-                print("new_accepted: "+str(new_accepted))
-                print("self.accepted: "+str(self.accepted))
+                print("*************************Testing A2 ******************************8")
+                #print("prev_accepted: "+str(prev_accepted))
+                #print("new_accepted: "+str(new_accepted))
+                #print("self.accepted: "+str(self.accepted))
                 for (b,s,p) in new_accepted:
                     #print(str(b)+" : "+str(self.ballot_num));
                     if b!=self.ballot_num:
@@ -233,11 +252,14 @@ class TestAcceptor(test.Acceptor):
                 if not A2:
                     invariantFailed.append('A2')
                 prev_accepted = self.accepted
-                print("************************* A2 ends ******************************8")
         
-
-        updateGlobalState(self,l,invariantFailed,args);
-        super(TestAcceptor,self).send(*args)  
+        currentprob = random.random()
+        if(currentprob>packetDrop):
+            updateGlobalState(self,l,invariantFailed,args);
+            time.sleep(random.randint(0, messageDelay))
+            super(TestAcceptor,self).send(*args) 
+        else:
+            print(str(self)+ " dropped Packet "+str(args[0][0])+" to "+str(args[1])); 
 
 class TestLeader(test.Leader):
     '''
@@ -245,7 +267,7 @@ class TestLeader(test.Leader):
     to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
     interface as that of the Base class methods.
     '''
-    def setup(acceptors, replicas,l, invariantFailed):
+    def setup(acceptors, replicas,l, invariantFailed, killLeader):
         '''
         Initialization
         param acceptors: set of acceptors
@@ -253,6 +275,7 @@ class TestLeader(test.Leader):
         '''
         output('Trace - Setup Leader')
         spawned_commanders = set()
+        timeout = killLeader[self]
         super(TestLeader,self).setup(acceptors, replicas)
 
     def main():
@@ -260,7 +283,19 @@ class TestLeader(test.Leader):
         Run the process
         '''
         output('Trace - start Leader')
-        super(TestLeader,self).main()
+
+        signal(SIGALRM, alarm_handler)
+
+       
+        try:
+            alarm(timeout)
+            super(TestLeader,self).main()
+            alarm(0)
+
+        except Alarm as s:
+            print("Leader "+str(self._id)+" failed")
+            kill(self, SIGKILL)
+
 
     def send(*args):
         '''
@@ -268,28 +303,36 @@ class TestLeader(test.Leader):
         param args: tuple containing the message and set of receivers
         '''
         #l.append('leader')
-        updateGlobalState(self,l,invariantFailed,args);
-        super(TestLeader,self).send(*args)  
+        currentprob = random.random()
+        if(currentprob>packetDrop):
+            updateGlobalState(self,l,invariantFailed,args);
+            time.sleep(random.randint(0,messageDelay))
+            super(TestLeader,self).send(*args)  
+        else:
+            print(str(self)+ " dropped Packet "+str(args[0][0])+" to "+str(args[1]));
     def spawn(pcls, args):
         args.append(l)
         args.append(invariantFailed)
-        if 'Scout' in str(pcls):
-            super(TestLeader,self).spawn(TestScout, args)
-        
-        if 'Commander' in str(pcls):
-            L1=True
-            print("******************************L1 starts*********************************")
-            output(str(args[3]));
-            print("Spawning Commander for :"+str(args[3]))
-            b,s,p=args[3]
-            if (b,s) in spawned_commanders:
-                L1 = False
-            else:
-                spawned_commanders.add((b,s))
-            if not L1:
-                invariantFailed.append('L1')
-            print("******************************L1 ends*********************************")
-            super(TestLeader,self).spawn(TestCommander, args)
+        try:
+            if 'Scout' in str(pcls):
+                super(TestLeader,self).spawn(TestScout, args)
+            
+            if 'Commander' in str(pcls):
+                L1=True
+                print("******************************Testing L1 *********************************")
+                print("Spawning Commander for Leader -"+str(args[3]))
+                b,s,p=args[3]
+                if (b,s) in spawned_commanders:
+                    L1 = False
+                else:
+                    spawned_commanders.add((b,s))
+                if not L1:
+                    invariantFailed.append('L1')
+                
+                super(TestLeader,self).spawn(TestCommander, args)
+        except subprocess.CalledProcessError as s:
+            print("CalledProcessError..")
+
 
 class TestCommander(test.Commander):
     '''
@@ -305,7 +348,6 @@ class TestCommander(test.Commander):
         param replicas: set of identifiers of the replicas
         param load: the pvalue i.e the (b, s, p) tuple with ballot number b, a slot number s, and a command c.
         '''
-        output('Trace - Setup Commander')
         super(TestCommander,self).setup(lam, acceptors, replicas, load)
 
     def main():
@@ -320,10 +362,15 @@ class TestCommander(test.Commander):
         Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
         param args: tuple containing the message and set of receivers
         '''
-        output('Trace - Send Commander')
+        #output('Trace - Send Commander')
         #l.append('Commander')
-        updateGlobalState(self,l,invariantFailed,args);
-        super(TestCommander,self).send(*args)  
+        currentprob = random.random()
+        if(currentprob>packetDrop):
+            updateGlobalState(self,l,invariantFailed,args);
+            time.sleep(random.randint(0,messageDelay))
+            super(TestCommander,self).send(*args)  
+        else:
+            print(str(self)+ " dropped Packet "+str(args[0][0])+" to "+str(args[1]));
 
 class TestScout(test.Scout):
     '''
@@ -338,7 +385,7 @@ class TestScout(test.Scout):
         param acceptors: set of identifers of the acceptors
         param b: ballot_num
         '''
-        output('Trace - Setup Scout')
+        #output('Trace - Setup Scout')
         super(TestScout,self).setup(lam, acceptors, b)
 
     def main():
@@ -346,7 +393,12 @@ class TestScout(test.Scout):
         Run the process
         '''
         output('Trace - Start Scout')
-        super(TestScout,self).main()
+        try:
+            super(TestScout,self).main()
+        except Exception as e:
+            pass
+
+
     
     def send(*args):
         '''
@@ -354,24 +406,35 @@ class TestScout(test.Scout):
         param args: tuple containing the message and set of receivers
         '''
         #l.append('Scout')
-        updateGlobalState(self,l,invariantFailed,args);
-        super(TestScout,self).send(*args)    
+        currentprob = random.random()
+        if(currentprob>packetDrop):
+            updateGlobalState(self,l,invariantFailed,args);
+            time.sleep(random.randint(0,messageDelay))
+            super(TestScout,self).send(*args)   
+        else:
+            print(str(self)+ " dropped Packet "+str(args[0][0])+" to "+str(args[1]));
 
-class TestClient(test.Client):
+class TestClient(DistProcess):
     '''
     This class extends the original implementation of the Client. The main aim of this class is to provide trace messages 
     to understand the flow of the algorithm and also to help maintain a global state of the algorithm. Each function uses the same 
     interface as that of the Base class methods.
     '''
-    def setup(replicas,l ,invariantFailed):
+    def setup(replicas,l ,invariantFailed, killClient):
         '''
         Initialization
         param replicas: set of identifiers of the replicas
         '''
         output('Trace - Setup Client')
+        timeout_times=0
+        cid = -1
+        results = dict()
+        count = dict()
         responseTime=7
         prev_result = 0
-        super(TestClient,self).setup(replicas)
+
+
+        #super(TestClient,self).setup(replicas)
 
     def main():
         '''
@@ -384,37 +447,56 @@ class TestClient(test.Client):
        
         try:
             alarm(responseTime)
-            super(TestClient,self).main()
+            #super(TestClient,self).main()
+
+            while (True):
+                no_of_req = 0
+                max_request_current = random.randint(1,max_request_batch)
+                cid_list = []
+                while no_of_req < max_request_current:
+                    cid+=1
+                    send(Request((self, cid, random.randint(0, NOPS-1))), replicas)
+                    cid_list.append(cid)
+                    no_of_req+=1
+                print(str(cid_list))
+                await(all(results.get(c) != None and count.get(c) == len(replicas) for c in cid_list))
+                #await(results.get(cid) != None and count.get(cid) == len(replicas))
+                for c in cid_list:
+                    output("Received result %d:%d" % (c, results[c]))
+                cid_list=[]
+                #cid += 1
             alarm(0)
 
         except Alarm as s:
-            print("***************************8invariantFailed***********************8")
+            print("Client Timed-out.."+str(timeout_times+1)+" time(s) ")
 
     def alarm_handler_client(signum, frame):
-        print("Client signal handler************************3*****")
         if not len(self.results) > prev_result:
-
-            output("******************************no new result received"+str(self.results))
-            invariantFailed.append("Liveness")
+            timeout_times+=1;
+            if(timeout_times>5):
+                output("******************************no new result received"+str(self.results))
+                invariantFailed.append("Liveness")
                 #kill(self, SIGKILL)
+            else:
+                responseTime=responseTime*2
+                alarm(responseTime)
         else:
+            timeout_times=0
+            #responseTime=5 #default response time
             prev_result=len(self.results)
-            responseTime=responseTime*2
+
             alarm(responseTime)
         #raise Alarm
-
-
-
-
-
-    def send(*args):
-        '''
-        Extend the send function of DistProcess for maintaing global queue and tracing system behaviour
-        param args: tuple containing the message and set of receivers
-        '''
-        #l.append('client')
-        updateGlobalState(self,l,invariantFailed,args);
-        super(TestClient,self).send(*args)
+    def OnResponse(cid, result):
+        if results.get(cid) == None:
+            results[cid] = result
+            count[cid] = 1
+        else:
+            if results[cid] != result:
+                output("Replicas out of sync at cid(%d) : %d - %d " %
+                       (cid, results[cid], result))
+            else:
+                count[cid] += 1
 
 class Monitor(DistProcess):
     def setup(l,invariantFailed, gdecision,gaccepted ,acceptors):
@@ -431,7 +513,7 @@ class Monitor(DistProcess):
         while not done:           
             time.sleep(1)
 
-            print("**************************************A4 invariants starts******************************")
+            print("************************************** Testing A4 ******************************")
 
             all_accepted = set()
             A4=True
@@ -446,19 +528,19 @@ class Monitor(DistProcess):
                         A4=False
             if not A4:
                 invariantFailed.append('A4')
-            print("**************************************A4 invariants ends******************************")
-            print("**************************************R1 invariants starts******************************")
+            
+            print("************************************** Testing R1 ******************************")
             #R1: Two different commands are never decided for the same slot
             R1 = True
-            print('gdecision: '+str(gdecision))
+            #print('gdecision: '+str(gdecision))
             for (s1, p1) in gdecision:
                 for (s2, p2) in gdecision:
                     if s1==s2 and not p1==p2:
                         R1=False
             if not R1:
                 invariantFailed.append('R1')
-            print("**************************************R1 invariants ends******************************")
-            print("**************************************L2, A5 invariants starts******************************")
+            
+            print("************************************** Testing L2, A5 ******************************")
             
             allAccepted = set()
             #print("gaccepted: "+str(gaccepted))
@@ -472,12 +554,12 @@ class Monitor(DistProcess):
                 for a in iter(gaccepted.keys()):
                     acc_list = gaccepted[a]
                     if acc in acc_list:
-                        print(str(acc)+' found in acceptor - '+str(a))
+                #        print(str(acc)+' found in acceptor - '+str(a))
                         acc_count+=1;
                     if acc_count > len(acceptors)/2:
                         break;
                 if(acc_count > len(acceptors)/2):
-                    print(str(acc)+"is in majority")
+                 #   print(str(acc)+"is in majority")
                     b,s,p =  acc
                     for a2 in iter(gaccepted.keys()):
                         acc_list2 = gaccepted[a2]
@@ -486,18 +568,19 @@ class Monitor(DistProcess):
                                 A5 = False
                                 print("L2, A5 failed for : "+str(acc)); 
                                 break;
-                print('While checking for '+str(acc)+', other c not found in accepted list for the same slot')
+                #print('While checking for '+str(acc)+', other c not found in accepted list for the same slot')
             if not A5:
                 invariantFailed.append('L2, A5')
 
-            print("**************************************A5 invariants ends******************************")
+            #print("**************************************A5 invariants ends******************************")
 
             if invariantFailed:
                 print("************************************** Failed ******************************")
                 print("Failed invariants: "+str(invariantFailed))
                 done = True;
             else:
-                print("**************************************All invariants hold******************************")
+                pass
+                #print("**************************************All invariants hold******************************")
                 #invariantFailed.append("All invariants hold")
                 #done = True;
     
@@ -509,18 +592,82 @@ def main():
     Begin the tests. This function is to be modified to enable passing input parameters for acceptors,nreplicas,nleaders,nclients,nops
     Also, other configuration options to support destruction/recovery of processes will be added.
     '''
-
+    inputfile='sdsa'
+    outputfile='sdsa'
     nacceptors = 5
     nreplicas = 5
     nleaders = 5
     nclients = 1
-    nops = 1
+    nops = 2
+    # no. of processes to kill
+    killInterval = 1
+    starttime = 2
+    nreplicakill = 0
+    nacceptorkill = 0
+    nleaderkill = 0
+    nclientkill = 0
+
+    global messageDelay
+    global packetDrop
+    global max_request_batch
+    try:
+        opts, args = getopt.getopt(sys.argv[1:],"ha:r:l:c:o:A:R:L:C:p:d:b:")
+        print(opts)
+    except getopt.GetoptError as e:
+        print('ERROR: test.py -i <inputfile> -o <outputfile>')
+        sys.exit(2)
+    for opt, arg in opts:
+
+        if opt == '-h':
+            print('test.py -i <inputfile> -o <outputfile>')
+            sys.exit()
+        elif opt in ("-a"):
+            nacceptors = int(arg)
+        elif opt in ("-r"):
+            nreplicas = int(arg)
+        elif opt in ("-l"):
+            nleaders = int(arg)
+        elif opt in ("-c"):
+            nclients = int(arg)
+        elif opt in ("-p"):
+            packetDrop=float(arg)
+        elif opt in ("-o"):
+            nops = int(arg)
+        elif opt in ("-A"):
+            nacceptorkill = int(arg)
+        elif opt in ("-R"):
+            nreplicakill = int(arg)
+        elif opt in ("-L"):
+            nleaderkill = int(arg)
+        elif opt in ("-C"):
+            nclientkill = int(arg)
+        elif opt in ("-d"):
+            messageDelay = int(arg)
+        elif opt in ("-b"):
+            max_request_batch = int(arg)
 
 
+    print("*************************************************************")        
+    print("                         configuration                       ")
+    print("*************************************************************")        
+    print('No of replicas   : '+str(nreplicas))
+    print('No of acceptors  : '+str(nacceptors))
+    print('No of leaders    : '+str(nleaders))
+    print('No of clients    : '+str(nclients))
+    print('No of operations : '+str(nops))
+    print('No of replicas to fail : '+str(nreplicakill))
+    print('No of acceptors to fail : '+str(nacceptorkill))
+    print('No of leaders to fail : '+str(nleaderkill))
+    print('No of client to fail : '+str(nclientkill))
+    print('Packet Drop Probability: '+str(packetDrop))
+    print('Message delay range (0, '+str(messageDelay)+" )")
+    print('Maximum requests in batch from client: '+str(max_request_batch))
+
+
+    #sys.exit()
 
     use_channel("tcp")
     manager = Manager()
-
 
     l = manager.list()
     invariantFailed = manager.list()
@@ -529,19 +676,24 @@ def main():
     '''
     Create processes for Acceptor,Replica,Leader,Client
     '''
-    acceptors = createprocs(TestAcceptor, nacceptors, [l, invariantFailed, gaccepted])
+    acceptors = createprocs(TestAcceptor, nacceptors)
     replicas = createprocs(TestReplica, nreplicas)
-    leaders = createprocs(TestLeader, nleaders, (acceptors, replicas,l,invariantFailed))
-    clients = createprocs(TestClient, nclients, (replicas,l,invariantFailed))
+    leaders = createprocs(TestLeader, nleaders)
+    clients = createprocs(TestClient, nclients)
 
-    # no. of processes to kill
-    nkillReplica = 4
-    killInterval = 1
-    starttime = 2
-    killReplica = killTimes(replicas,nkillReplica,starttime,killInterval)
-    print("kill times : "+str(killReplica))
+    killReplica = killTimes(replicas, nreplicakill, starttime, killInterval)
+    #print("kill times : "+str(killReplica))
+    killAcceptor = killTimes(acceptors, nacceptorkill, starttime, killInterval)
+    #print("kill times : "+str(killAcceptor))
+    killLeader = killTimes(leaders, nleaderkill, starttime, killInterval)
+    #print("kill times : "+str(killLeader))
+    killClient = killTimes(clients, nclientkill, starttime, killInterval)
+    #print("kill times : "+str(killClient))
 
     setupprocs(replicas, (leaders, 0, l, invariantFailed, gdecision, killReplica))
+    setupprocs(acceptors, (l, invariantFailed, gaccepted, killAcceptor))
+    setupprocs(leaders, (acceptors, replicas, l, invariantFailed, killLeader))
+    setupprocs(clients, (replicas, l, invariantFailed, killClient))
     '''
     Run processes for Acceptor,Replica,Leader,Client
     '''
@@ -551,8 +703,6 @@ def main():
     
     monitor = createprocs(Monitor,1,[l, invariantFailed,gdecision, gaccepted,  acceptors])
     startprocs(monitor)
-
-    
 
     while not (len(invariantFailed)>0): pass
     print("******************************invariantFailed time: "+str(time.time()))
@@ -578,11 +728,12 @@ def updateGlobalState(self, l,invariantFailed,args):
     '''
     global myqueue
     #print("************************************"+str(l))
-    #print("*******************updateGlobalState***************************** A1  starts******************************")
+    
     # A1: an acceptor can only adopt strictly increasing ballot numbers;
     A1 = True;
     if args[0][0]=='P2b':
-        print(str(self)+" Sending: ballot_num: "+str(args[0][2][0])+" to "+str(args[1]))
+        print("******************************************** Testing A1 ******************************")
+        print("Acceptor " + str(self)+" sending ballot_num: "+str(args[0][2][0])+" to Commander "+str(args[1]))
         new_ballot_num =  args[0][2][0]
         #test invariant A1 before adding to list
         for (sender,msg) in l:
@@ -601,13 +752,18 @@ def getGlobal():
     print('global queue '+str(myqueue))
     return myqueue
 
-def killTimes(replicas,nkillReplica,replicaTimeout,killInterval):
-    killReplicaList = random.sample(replicas, nkillReplica)
-    killReplica = dict({r : 0 for r in replicas})
-    for r in killReplica:
-        if r in killReplicaList:
-            killReplica[r]=replicaTimeout;
-            replicaTimeout=replicaTimeout+killInterval
+def killTimes(processes,nkillProcess,starttime,killInterval):
+    killProcessList = random.sample(processes, nkillProcess)
+    killProcess = dict({r : 0 for r in processes})
+    for r in killProcess:
+        if r in killProcessList:
+            killProcess[r]=starttime;
+            starttime=starttime+killInterval
     
-    return killReplica
-#runTests();
+    return killProcess
+
+import logging
+
+#if __name__ == "__main__":
+logging.basicConfig(level=logging.INFO, filename="logfile", filemode="w+",
+                        format="%(asctime)-15s %(levelname)-8s %(message)s")
